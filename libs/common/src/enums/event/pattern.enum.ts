@@ -1,0 +1,5 @@
+export enum EEventPattern {
+  CREATE_USER = 'CREATE_USER',
+  UPDATE_USER = 'UPDATE_USER',
+  UPDATE_LECTURE = 'UPDATE_LECTURE',
+}

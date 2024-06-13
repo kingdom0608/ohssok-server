@@ -1,0 +1,198 @@
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  deploy:
+    name: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure for dev branch
+        if: ${{ github.ref_name == 'develop' }}
+        run: |
+          echo "STAGE=develop" >> $GITHUB_ENV
+
+      - name: Configure for main branch
+        if: ${{ github.ref_name == 'main' }}
+        run: |
+          echo "STAGE=production" >> $GITHUB_ENV
+
+      - name: checkout
+        uses: actions/checkout@v3
+
+      - name: Use Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Cash node_modules
+        uses: actions/cache@v3
+        id: node-cache
+        with:
+          path: node_modules
+          key: npm-packages-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Install Dependencies
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: get-npm-version
+        id: package-version
+        uses: martinbeentjes/npm-get-version-action@main
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push docker image to Amazon ECR
+        id: build-image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ohssok
+          IMAGE_TAG: ${{ env.STAGE }}-${{ steps.package-version.outputs.current-version }}
+        run: |
+          docker build -f ./apps/api-server/Dockerfile.${{ env.STAGE }} -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
+          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
+          echo "image=$REGISTRY/$REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+          --task-definition $STAGE-ohssok \
+          --query taskDefinition \
+          > task-definition.json
+
+      - name: Render Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ohssok
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.STAGE }}-ohssok
+          cluster: ohssok-cluster
+          wait-for-service-stability: true
+
+      - name: Send Result
+        if: ${{ always() }}
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          field: repo,message,commit,author,action,eventName,ref,workflow,job,took,pullRequest
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEB_HOOK_URL }}
+
+  # deploy-event:
+  #   name: build-event
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #     - name: Configure for dev branch
+  #       if: ${{ github.ref_name == 'develop' }}
+  #       run: |
+  #         echo "STAGE=develop" >> $GITHUB_ENV
+
+  #     - name: Configure for main branch
+  #       if: ${{ github.ref_name == 'main' }}
+  #       run: |
+  #         echo "STAGE=production" >> $GITHUB_ENV
+
+  #     - name: checkout
+  #       uses: actions/checkout@v3
+
+  #     - name: Use Node
+  #       uses: actions/setup-node@v3
+  #       with:
+  #         node-version: 18
+
+  #     - name: Cash node_modules
+  #       uses: actions/cache@v3
+  #       id: node-cache
+  #       with:
+  #         path: node_modules
+  #         key: npm-packages-${{ hashFiles('**/package-lock.json') }}
+
+  #     - name: Install Dependencies
+  #       if: steps.node-cache.outputs.cache-hit != 'true'
+  #       run: npm install
+
+  #     - name: Build
+  #       run: npm run build:event-server
+
+  #     - name: get-npm-version
+  #       id: package-version
+  #       uses: martinbeentjes/npm-get-version-action@main
+
+  #     - name: Configure AWS Credentials
+  #       uses: aws-actions/configure-aws-credentials@v1
+  #       with:
+  #         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws-region: ${{ secrets.AWS_REGION }}
+
+  #     - name: Login to Amazon ECR
+  #       id: login-ecr
+  #       uses: aws-actions/amazon-ecr-login@v1
+
+  #     - name: Build, tag, and push docker image to Amazon ECR
+  #       id: build-image
+  #       env:
+  #         REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+  #         REPOSITORY: ohssok-event
+  #         IMAGE_TAG: ${{ env.STAGE }}-${{ steps.package-version.outputs.current-version }}
+  #       run: |
+  #         docker build -f ./apps/event-server/Dockerfile.${{ env.STAGE }} -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
+  #         docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
+  #         echo "image=$REGISTRY/$REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  #     - name: Download task definition
+  #       run: |
+  #         aws ecs describe-task-definition \
+  #         --task-definition $STAGE-ohssok-event \
+  #         --query taskDefinition \
+  #         > task-definition.json
+
+  #     - name: Render Amazon ECS task definition
+  #       id: task-def
+  #       uses: aws-actions/amazon-ecs-render-task-definition@v1
+  #       with:
+  #         task-definition: task-definition.json
+  #         container-name: ohssok-event
+  #         image: ${{ steps.build-image.outputs.image }}
+
+  #     - name: Deploy to Amazon ECS
+  #       uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+  #       with:
+  #         task-definition: ${{ steps.task-def.outputs.task-definition }}
+  #         service: ${{ env.STAGE }}-ohssok-event
+  #         cluster: ohssok-cluster
+  #         wait-for-service-stability: true
+
+  #     - name: Send Result
+  #       if: ${{ always() }}
+  #       uses: 8398a7/action-slack@v3
+  #       with:
+  #         status: ${{ job.status }}
+  #         field: repo,message,commit,author,action,eventName,ref,workflow,job,took,pullRequest
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEB_HOOK_URL }}
